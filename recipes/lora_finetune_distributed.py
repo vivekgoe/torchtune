@@ -485,6 +485,20 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                 model, auto_wrap_policy={modules.TransformerSelfAttentionLayer}
             )
 
+        if torch.hpu.is_available():
+            # Initialize LoRA params and RoPE buffers (Before FSDP sharding)
+            with training.set_default_dtype(self._dtype), self._device:
+                lora_device = "cpu" if fsdp_cpu_offload else self._device
+                for m in model.modules():
+                    if (isinstance(m, AdapterModule)) and not lora_weights_state_dict:
+                        # lora may not be covered in state dict
+                        # if finetune for the 1st time
+                        m.to_empty(device=lora_device)
+                        m.initialize_parameters()
+
+                    if hasattr(m, "rope_init"):
+                        m.rope_init()
+
         # For FSDP sharding
         fsdp_shard_conditions = [
             partial(
@@ -509,18 +523,19 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         else:
             lora_missing, lora_unexpected = None, None
 
-        # Initialize LoRA params and RoPE buffers
-        with training.set_default_dtype(self._dtype), self._device:
-            lora_device = "cpu" if fsdp_cpu_offload else self._device
-            for m in model.modules():
-                if (isinstance(m, AdapterModule)) and not lora_weights_state_dict:
-                    # lora may not be covered in state dict
-                    # if finetune for the 1st time
-                    m.to_empty(device=lora_device)
-                    m.initialize_parameters()
+        if torch.cuda.is_available():
+            # Initialize LoRA params and RoPE buffers
+            with training.set_default_dtype(self._dtype), self._device:
+                lora_device = "cpu" if fsdp_cpu_offload else self._device
+                for m in model.modules():
+                    if (isinstance(m, AdapterModule)) and not lora_weights_state_dict:
+                        # lora may not be covered in state dict
+                        # if finetune for the 1st time
+                        m.to_empty(device=lora_device)
+                        m.initialize_parameters()
 
-                if hasattr(m, "rope_init"):
-                    m.rope_init()
+                    if hasattr(m, "rope_init"):
+                        m.rope_init()
 
         base_missing, base_unexpected = training.load_from_full_model_state_dict(
             model,
