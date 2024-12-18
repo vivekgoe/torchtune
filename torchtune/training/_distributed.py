@@ -173,6 +173,8 @@ def _broadcast_tensor(tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
             tensor = tensor.to(get_device("cuda"))
         elif dist.get_backend() == "xccl":
             tensor = tensor.to(get_device("xpu"))
+        elif dist.get_backend() == "hccl":
+            tensor = tensor.to(get_device("hpu"))
         dist.broadcast(tensor, src=src, group=None)
         return tensor.to(device)
     else:
