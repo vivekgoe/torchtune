@@ -47,6 +47,19 @@ def is_torch_npu_available() -> bool:
 is_npu_available = is_torch_npu_available()
 
 
+def is_torch_hpu_available() -> bool:
+    """Check the availability of HPU"""
+    try:
+        import habana_frameworks.torch  # noqa: F401
+
+        return torch.hpu.is_available()
+    except ImportError:
+        return False
+
+
+is_hpu_available = is_torch_hpu_available()
+
+
 def _get_local_rank() -> Optional[int]:
     """Function that gets the local rank from the environment.
 
@@ -77,7 +90,6 @@ def _setup_device(device: torch.device) -> torch.device:
     device_type = device_support.device_type
     device_name = device_support.device_name
     torch_device = get_torch_device_namespace()
-
     if device.index is None:
         device = torch.device(type=device_type, index=local_rank)
 
@@ -102,6 +114,8 @@ def _get_device_type_from_env() -> str:
         device = "cuda"
     elif is_npu_available:
         device = "npu"
+    elif is_hpu_available:
+        device = "hpu"
     elif torch.xpu.is_available():
         device = "xpu"
     else:
@@ -164,7 +178,7 @@ def get_device(device: Optional[str] = None) -> torch.device:
     if device is None:
         device = _get_device_type_from_env()
     device = torch.device(device)
-    if device.type in ["cuda", "npu", "xpu"]:
+    if device.type in ["cuda", "npu", "xpu", "hpu"]:
         device = _setup_device(device)
     _validate_device_from_env(device)
     return device
@@ -211,6 +225,7 @@ class DeviceSupport(Enum):
     CUDA = ("cuda", "GPU", "nccl")
     NPU = ("npu", "NPU", "hccl")
     XPU = ("xpu", "XPU", "ccl")
+    HPU = ("hpu", "HPU", "hccl")
 
     def __init__(
         self,
