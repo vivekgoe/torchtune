@@ -27,7 +27,8 @@ PROFILER_KEY = "profiler"
 DEFAULT_PROFILER_ACTIVITIES = {
     torch.profiler.ProfilerActivity.CPU,
     torch.profiler.ProfilerActivity.CUDA,
-    torch.profiler.ProfilerActivity.XPU,
+    # TODO Uncomment after SW-221377 is fixed
+    # torch.profiler.ProfilerActivity.XPU,
 }
 
 DEFAULT_SCHEDULE: dict = {
