@@ -142,15 +142,48 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         )
         init_process_group(self.distributed_backend)
 
+        # Initialize distributed variables
         self.world_size, self.rank = utils.get_world_size_and_rank()
-
         self._is_rank_zero = self.rank == 0
+        data_shard = cfg.get("data_parallel_shard_dim", -1)  # -1 means to infer
+        data_replicate = cfg.get("data_parallel_replicate_dim", 1)
+        self.cp_degree = cfg.get("context_parallel_dim", 1)
+        self.context_parallel_rotate_method = cfg.get("context_parallel_rotate_method", "none")
 
+        # Set up n-d device mesh
+        self.parallel_dims = training.ParallelDims(
+            dp_replicate=data_replicate,
+            dp_shard=data_shard,
+            tp=1,
+            cp=self.cp_degree,
+            world_size=self.world_size,
+        )
+        self.world_mesh = self.parallel_dims.build_mesh(device_type=cfg.device)
+        
+        if self.parallel_dims.dp_enabled:
+            dp_mesh = self.world_mesh["dp"]
+            self.dp_degree, self.dp_rank = (
+                dp_mesh.size(),
+                dp_mesh.get_local_rank(),
+            )
+        else:
+            self.dp_degree, self.dp_rank = 1, 0
+
+
+        self.train_context = training.get_train_context(
+            enable_loss_parallel=False,
+            enable_compiled_autograd=False,
+        )
         # logging attributes
         self._output_dir = cfg.output_dir
         self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
         self._log_peak_memory_stats = cfg.get("log_peak_memory_stats", False)
         self._logger = utils.get_logger(cfg.log_level)
+
+        utils.log_rank_zero(
+            self._logger,
+            f" WORLD DEVICE MESH: {self.world_mesh}, CP DEVICE MESH: {self.world_mesh['cp']}\n",
+        )
 
         if self._log_peak_memory_stats and self._device.type not in {"cuda", "xpu"}:
             self._logger.info(
@@ -519,11 +552,17 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                 names_to_match=custom_sharded_layers,
             )
         ]
+        if self.parallel_dims.dp_replicate_enabled:
+                dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+        else:
+            dp_mesh_dim_names = ("dp_shard_cp",)
+        
         training.shard_model(
             model=model,
             shard_conditions=fsdp_shard_conditions,
             cpu_offload=fsdp_cpu_offload,
             reshard_after_forward=reshard_after_forward,
+            dp_mesh=self.world_mesh[dp_mesh_dim_names],
         )
 
         if lora_weights_state_dict:
@@ -641,10 +680,10 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                 for single_cfg_dataset in cfg_dataset
             ]
             ds = ConcatDataset(datasets=datasets)
-            packed = getattr(ds, "packed", False)
+            self.packed_dataset = getattr(ds, "packed", False)
         else:
             ds = config.instantiate(cfg_dataset, self._tokenizer)
-            packed = cfg_dataset.get("packed", False)
+            self.packed_dataset = cfg_dataset.get("packed", False)
 
         # Instantiate collate_fn
         if "left_pad_sequence" in collate_fn:
@@ -667,7 +706,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                     padding_idx=self._tokenizer.pad_id,
                     ignore_idx=self._loss_fn.ignore_index,
                 )
-                if not packed
+                if not self.packed_dataset
                 else padded_collate_packed
             ),
             # dropping last avoids shape issues with compile + flex attention
@@ -930,17 +969,50 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
     def _loss_step(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         # Shape [b, s], needed for the loss not the model
         labels = batch.pop("labels")
+        if self.cp_degree>1 and self._tokenizer.pad_to_max_seq_len and not self.packed_dataset:
+            # For cp we need to pass the buffer and the buffer dim (cp_seq_dims) to apply cp
+            cp_buffers = []
+            for k,v in batch.items():
+                if isinstance(v, torch.Tensor):
+                    cp_buffers.append(v)
 
-        with self.activations_handling_ctx:
-            outputs = self._model(**batch)
+            cp_buffers.append(labels)
 
-        if self.linear_loss:
-            weight = self._model.linear_projection_weight
-            loss = self._loss_fn(weight, outputs, labels)
+            optional_context_parallel_ctx = (
+            training.create_context_parallel_ctx(
+                cp_mesh=self.world_mesh["cp"],
+                cp_buffers=cp_buffers,
+                cp_seq_dims=[1]*len(cp_buffers),
+                cp_no_restore_buffers=set(cp_buffers),
+                cp_rotate_method=self.context_parallel_rotate_method,
+            )
+            if self.parallel_dims.cp_enabled
+            else None
+            )
+
+            with optional_context_parallel_ctx:
+                with self.activations_handling_ctx:
+                    outputs = self._model(**batch)
+
+                if self.linear_loss:
+                    weight = self._model.linear_projection_weight
+                    loss = self._loss_fn(weight, outputs, labels)
+                else:
+                    labels = labels.reshape(-1)
+                    outputs = outputs.reshape(-1, outputs.size(-1))
+                    loss = self._loss_fn(outputs, labels)
+
         else:
-            labels = labels.reshape(-1)
-            outputs = outputs.reshape(-1, outputs.size(-1))
-            loss = self._loss_fn(outputs, labels)
+            with self.activations_handling_ctx:
+                outputs = self._model(**batch)
+
+            if self.linear_loss:
+                weight = self._model.linear_projection_weight
+                loss = self._loss_fn(weight, outputs, labels)
+            else:
+                labels = labels.reshape(-1)
+                outputs = outputs.reshape(-1, outputs.size(-1))
+                loss = self._loss_fn(outputs, labels)
 
         # free logits otherwise it peaks backward memory
         del outputs

@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from typing import Optional
+from typing import Optional, Callable
 
 import torch
 from torch import nn
@@ -98,6 +98,7 @@ class MultiHeadAttention(nn.Module):
         max_seq_len: int = 4096,
         is_causal: bool = True,
         attn_dropout: float = 0.0,
+        attn_func: Callable = _sdpa_or_flex_attention,
     ) -> None:
         super().__init__()
         if num_heads % num_kv_heads != 0:
@@ -137,8 +138,11 @@ class MultiHeadAttention(nn.Module):
         self.k_norm = k_norm
         self.pos_embeddings = pos_embeddings
 
-        # Use flex attention if supported and we are sample packing
-        self._attention_call = _sdpa_or_flex_attention()
+        # Use flex/sdpa attention if supported and we are sample packing else use custom attention
+        if attn_func is _sdpa_or_flex_attention:
+            self._attention_call = _sdpa_or_flex_attention()
+        else:
+            self._attention_call = attn_func
 
         # this flag indicates whether to update the kv-cache during forward
         # passes. when disabled, we can have the cache setup but still

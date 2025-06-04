@@ -4,10 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import List, Optional
+from typing import List, Optional, Callable
 
 from torch import nn
 
+from torchtune.modules.attention_utils import _sdpa_or_flex_attention, scaled_dot_product_attention
 from torchtune.models.llama3._model_utils import scale_hidden_dim_for_mlp
 from torchtune.models.llama3_1._position_embeddings import Llama3ScaledRoPE
 from torchtune.modules import (
@@ -139,6 +140,7 @@ def lora_llama3_1(
     lora_attn_modules: List[LORA_ATTN_MODULES],
     apply_lora_to_mlp: bool = False,
     apply_lora_to_output: bool = False,
+    attn_func: str = None,
     *,
     # llama3.1 args
     vocab_size: int,
@@ -206,7 +208,9 @@ def lora_llama3_1(
     hidden_dim = intermediate_dim if intermediate_dim else scale_hidden_dim_for_mlp(embed_dim)
     head_dim = embed_dim // num_heads
     rope = Llama3ScaledRoPE(dim=head_dim, max_seq_len=max_seq_len, base=rope_base, scale_factor=scale_factor)
-    
+
+    attn_func = _sdpa_or_flex_attention if attn_func is None else scaled_dot_product_attention
+
     layers = nn.ModuleList()
     for _ in range(num_layers):
         self_attn = lora_llama3_attention(
@@ -218,6 +222,7 @@ def lora_llama3_1(
             num_kv_heads=num_kv_heads,
             max_seq_len=max_seq_len,
             attn_dropout=attn_dropout,
+            attn_func=attn_func,
             lora_rank=lora_rank,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
@@ -287,6 +292,7 @@ def lora_llama3_attention(
     max_seq_len: int,
     is_causal: bool = True,
     attn_dropout: float = 0.0,
+    attn_func: Optional[Callable] = _sdpa_or_flex_attention,
     # LoRA args
     lora_rank: int,
     lora_alpha: float,
@@ -420,6 +426,7 @@ def lora_llama3_attention(
         max_seq_len=max_seq_len,
         is_causal=is_causal,
         attn_dropout=attn_dropout,
+        attn_func=attn_func,
     )
     return self_attn
 
