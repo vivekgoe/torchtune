@@ -62,6 +62,53 @@ def truncate(
 
     return tokens_truncated
 
+def pad_tokens(
+    tokens: List[Any],
+    mask: List[Any],
+    max_seq_len: int,
+    pad_id: int,
+    eos_id: Optional[Any] = None,
+    pad_type: str = "right",
+) -> List[Any]:
+    """
+    Pad a list of tokens and masks to a maximum seq length.
+    If eos_id is provided, the last token will be replaced with eos_id.
+
+    Args:
+        tokens (List[Any]): list of tokens to pad
+        mask (List[Any]): list of masks to pad
+        max_seq_len (int): maximum length of the list
+        pad_id (int): token used for padding
+        eos_id (Optional[Any]): token to replace the last token with. If None, the
+            last token will not be replaced. Default is None.
+        pad_type (str): type of padding to apply, either "left" or "right".
+            Default is "right".
+
+    Returns:
+        Tuple[List[Any], List[bool]]: padded tokens and attention mask (True for real tokens, False for padding)
+
+    Raises:
+        ValueError: if pad_type is not "left" or "right"
+    """
+
+    padding_length = max_seq_len - len(tokens)
+    if padding_length > 0:
+        if pad_type == "right":
+            tokens = tokens + [pad_id] * padding_length
+            mask = mask + [False] * padding_length
+        elif pad_type == "left":
+            tokens = [pad_id] * padding_length + tokens
+            mask = [False] * padding_length + mask
+        else:
+            raise ValueError(
+                f"truncation_type must be 'left' or 'right', got {pad_type}"
+            )
+
+    # Replace the last token with eos_id if necessary
+    if eos_id is not None and tokens and tokens[-1] != eos_id:
+        tokens[-1] = eos_id
+
+    return tokens, mask
 
 def load_image(image_loc: Union[Path, str]) -> torch.Tensor:
     """

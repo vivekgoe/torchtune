@@ -7,7 +7,7 @@
 import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from torchtune.data import Message, PromptTemplate, truncate
+from torchtune.data import Message, PromptTemplate, truncate, pad_tokens
 from torchtune.modules.transforms import Transform
 from torchtune.modules.transforms.tokenizers import (
     ModelTokenizer,
@@ -82,6 +82,7 @@ class Llama3Tokenizer(ModelTokenizer, Transform):
         max_seq_len: Optional[int] = None,
         prompt_template: Optional[PromptTemplate] = None,
         truncation_type: str = "right",
+        pad_to_max_seq_len: bool = False,
     ):
         self.special_tokens = (
             special_tokens if special_tokens is not None else LLAMA3_SPECIAL_TOKENS
@@ -118,7 +119,7 @@ class Llama3Tokenizer(ModelTokenizer, Transform):
             special_tokens=self.special_tokens,
         )
         self.max_seq_len = max_seq_len
-
+        self.pad_to_max_seq_len = pad_to_max_seq_len
         self.prompt_template = prompt_template
 
         # Regex for removing special tokens from the decoded string
@@ -339,6 +340,15 @@ class Llama3Tokenizer(ModelTokenizer, Transform):
                 max_seq_len=self.max_seq_len,
                 eos_id=True if add_end_tokens else None,
                 truncation_type=self.truncation_type,
+            )
+
+        # Add padding if pad_to_max_seq_len=True and max_seq_len is set
+        if self.pad_to_max_seq_len:
+            tokens, mask = pad_tokens(
+                tokens=tokens,
+                mask=mask,
+                max_seq_len=self.max_seq_len,
+                pad_id=self.pad_id,
             )
 
         return tokens, mask

@@ -71,6 +71,7 @@ def llama3_tokenizer(
     max_seq_len: Optional[int] = None,
     prompt_template: Optional[_TemplateType] = None,
     truncation_type: str = "right",
+    pad_to_max_seq_len: bool = False,
 ) -> Llama3Tokenizer:
     """
     Tokenizer for Llama3.
@@ -106,6 +107,7 @@ def llama3_tokenizer(
         max_seq_len=max_seq_len,
         prompt_template=template,
         truncation_type=truncation_type,
+        pad_to_max_seq_len=pad_to_max_seq_len,
     )
 
 
