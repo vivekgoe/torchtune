@@ -142,9 +142,32 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         )
         init_process_group(self.distributed_backend)
 
+        # Initialize distributed variables
         self.world_size, self.rank = utils.get_world_size_and_rank()
-
         self._is_rank_zero = self.rank == 0
+        data_shard = cfg.get("data_parallel_shard_dim", -1)  # -1 means to infer
+        data_replicate = cfg.get("data_parallel_replicate_dim", 1)
+        self.cp_degree = cfg.get("context_parallel_dim", 1)
+        self.context_parallel_rotate_method = cfg.get("context_parallel_rotate_method", "none")
+
+        # Set up n-d device mesh
+        self.parallel_dims = training.ParallelDims(
+            dp_replicate=data_replicate,
+            dp_shard=data_shard,
+            tp=1,
+            cp=self.cp_degree,
+            world_size=self.world_size,
+        )
+        self.world_mesh = self.parallel_dims.build_mesh(device_type=cfg.device)
+
+        if self.parallel_dims.dp_enabled:
+            dp_mesh = self.world_mesh["dp"]
+            self.dp_degree, self.dp_rank = (
+                dp_mesh.size(),
+                dp_mesh.get_local_rank(),
+            )
+        else:
+            self.dp_degree, self.dp_rank = 1, 0
 
         # logging attributes
         self._output_dir = cfg.output_dir
@@ -479,6 +502,11 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         self._apply_lora_to_mlp = cfg_model.apply_lora_to_mlp
         self._apply_lora_to_output = getattr(cfg_model, "apply_lora_to_output", False)
 
+        if self.cp_degree > 1:
+            utils.log_rank_zero(
+            self._logger,
+            f"CP is enabled with degree {self.cp_degree} and rotate method {self.context_parallel_rotate_method}.",
+        )
         utils.log_rank_zero(
             self._logger,
             "FSDP is enabled. Instantiating model and loading checkpoint on Rank 0 ...",
@@ -505,11 +533,19 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                 names_to_match=custom_sharded_layers,
             )
         ]
+
+        # For HSDP pass replicate dimension to dp_mesh
+        if self.parallel_dims.dp_replicate_enabled:
+            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+        else:
+            dp_mesh_dim_names = ("dp_shard_cp",)
+
         training.shard_model(
             model=model,
             shard_conditions=fsdp_shard_conditions,
             cpu_offload=fsdp_cpu_offload,
             reshard_after_forward=reshard_after_forward,
+            dp_mesh=self.world_mesh[dp_mesh_dim_names],
         )
 
         if lora_weights_state_dict:
@@ -915,9 +951,33 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
     def _loss_step(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         # Shape [b, s], needed for the loss not the model
         labels = batch.pop("labels")
+        if self.cp_degree>1:
+            # For cp we need to pass the buffer
+            # and the buffer dim (cp_seq_dims) to apply cp
+            cp_buffers = [labels]
+            for k,v in batch.items():
+                if isinstance(v, torch.Tensor):
+                    cp_buffers.append(v)
 
-        with self.activations_handling_ctx:
-            outputs = self._model(**batch)
+            # Create context parallel context if cp is enabled
+            optional_context_parallel_ctx = (
+            training.create_context_parallel_ctx(
+                cp_mesh=self.world_mesh["cp"],
+                cp_buffers=cp_buffers,
+                cp_seq_dims=[1]*len(cp_buffers),
+                cp_no_restore_buffers=set(cp_buffers),
+                cp_rotate_method=self.context_parallel_rotate_method,
+            )
+            if self.parallel_dims.cp_enabled
+            else None
+            )
+
+            with optional_context_parallel_ctx:
+                with self.activations_handling_ctx:
+                    outputs = self._model(**batch)
+        else:
+            with self.activations_handling_ctx:
+                outputs = self._model(**batch)
 
         if self.linear_loss:
             weight = self._model.linear_projection_weight
@@ -932,7 +992,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
 
         return loss
 
-    def validate(self) -> Dict[str, float]:
+    def validate(self) -> dict[str, float]:
         """
         Run validation loop and return average validation loss.
         """
@@ -968,7 +1028,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         log_dict = {"val_loss": avg_val_loss}
 
         if self._is_rank_zero:
-            log.info(f"Validation loss: {avg_val_loss:.4f}")
+            self._logger.info(f"Validation loss: {avg_val_loss:.4f}")
             self._metric_logger.log_dict(
                 log_dict,
                 step=self.global_step,

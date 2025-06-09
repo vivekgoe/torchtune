@@ -10,6 +10,7 @@ from torchtune.training._activation_offloading import (
 )
 from torchtune.training._compile import compile_loss, compile_model
 from torchtune.training._distributed import (
+    create_context_parallel_ctx,
     gather_cpu_state_dict,
     get_distributed_backend,
     get_full_optimizer_state_dict,
@@ -78,6 +79,7 @@ from torchtune.training.quantization import get_quantizer_mode
 from torchtune.training.seed import set_seed
 
 __all__ = [
+    "create_context_parallel_ctx",
     "get_act_offloading_ctx_manager",
     "prepare_mha_for_tp",
     "apply_selective_activation_checkpointing",
