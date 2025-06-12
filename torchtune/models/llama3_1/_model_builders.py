@@ -90,6 +90,7 @@ def lora_llama3_1_8b(
     lora_dropout: float = 0.0,
     use_dora: bool = False,
     quantize_base: bool = False,
+    max_seq_len: int = 131072,
 ) -> TransformerDecoder:
     """
     Builder for creating a Llama3.1 8B model with LoRA enabled.
@@ -125,7 +126,7 @@ def lora_llama3_1_8b(
         num_heads=32,
         num_kv_heads=8,
         embed_dim=4096,
-        max_seq_len=131072,
+        max_seq_len=max_seq_len,
         intermediate_dim=14336,
         attn_dropout=0.0,
         norm_eps=1e-5,

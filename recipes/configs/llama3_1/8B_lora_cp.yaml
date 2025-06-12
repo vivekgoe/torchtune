@@ -34,6 +34,11 @@ model:
   lora_rank: 8  # higher increases accuracy and memory
   lora_alpha: 16  # usually alpha=2*rank
   lora_dropout: 0.0
+  max_seq_len: 2048 # should be same as tokenizer.max_seq_len
+
+# Parallelism
+context_parallel_dim: 2
+context_parallel_rotate_method: 'alltoall'  # possible values 'alltoall' or 'allgather'
 
 checkpointer:
   _component_: torchtune.training.FullModelHFCheckpointer

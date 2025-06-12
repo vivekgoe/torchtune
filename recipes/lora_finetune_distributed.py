@@ -7,6 +7,7 @@
 import sys
 import time
 
+from contextlib import nullcontext
 from functools import partial
 from typing import Any, Dict, List, Optional, Union
 from warnings import warn
@@ -149,12 +150,14 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         data_replicate = cfg.get("data_parallel_replicate_dim", 1)
         self.cp_degree = cfg.get("context_parallel_dim", 1)
         self.context_parallel_rotate_method = cfg.get("context_parallel_rotate_method", "none")
+        self.tp_degree = cfg.get("tensor_parallel_dim", 1)
+        assert (self.tp_degree == 1), "Tensor parallelism is not supported in this recipe. Please set tensor_parallel_dim to 1."
 
         # Set up n-d device mesh
         self.parallel_dims = training.ParallelDims(
             dp_replicate=data_replicate,
             dp_shard=data_shard,
-            tp=1,
+            tp=self.tp_degree,
             cp=self.cp_degree,
             world_size=self.world_size,
         )
@@ -810,6 +813,25 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
 
         torch.distributed.barrier()
 
+    def _prepare_cp_context(self, batch: Dict[str, torch.Tensor]) -> Any:
+        """Prepare context parallel context for the given batch."""
+        # For cp we need to pass the buffer and buffer dim to apply cp
+        cp_buffers = []
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                cp_buffers.append(v)
+
+        # If the model has cache, add it to cp buffers
+        rope_cache = [module.cache for module in self._model.modules() if hasattr(module, "cache")]
+
+        return training.create_context_parallel_ctx(
+            cp_mesh=self.world_mesh["cp"],
+            cp_buffers=cp_buffers + rope_cache,
+            cp_seq_dims=[1] * len(cp_buffers) + [0] * len(rope_cache),
+            cp_no_restore_buffers=set(cp_buffers),
+            cp_rotate_method=self.context_parallel_rotate_method,
+        )
+
     def train(self) -> None:
         """
         The core training loop.
@@ -842,19 +864,20 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                     torch.cuda.memory._record_memory_history()
 
                 utils.batch_to_device(batch, self._device)
+                cp_ctx = self._prepare_cp_context(batch) if self.cp_degree > 1 else nullcontext()
+                with cp_ctx:
+                    # Calculate the number of unmasked tokens in the current batch
+                    # and increment the total number of tokens seen in the step
+                    current_num_tokens = (
+                        batch["labels"] != self._loss_fn.ignore_index
+                    ).sum()
+                    num_tokens += current_num_tokens
 
-                # Calculate the number of unmasked tokens in the current batch
-                # and increment the total number of tokens seen in the step
-                current_num_tokens = (
-                    batch["labels"] != self._loss_fn.ignore_index
-                ).sum()
-                num_tokens += current_num_tokens
-
-                # Loss is normalized by default so we multiply by the number of tokens
-                # This way we can normalize by the total number of tokens if we're accumulating gradients
-                current_loss = self._loss_step(batch) * current_num_tokens
-                running_loss += current_loss
-                current_loss.backward()
+                    # Loss is normalized by default so we multiply by the number of tokens
+                    # This way we can normalize by the total number of tokens if we're accumulating gradients
+                    current_loss = self._loss_step(batch) * current_num_tokens
+                    running_loss += current_loss
+                    current_loss.backward()
 
                 # Step with optimizer
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
@@ -951,33 +974,9 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
     def _loss_step(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         # Shape [b, s], needed for the loss not the model
         labels = batch.pop("labels")
-        if self.cp_degree>1:
-            # For cp we need to pass the buffer
-            # and the buffer dim (cp_seq_dims) to apply cp
-            cp_buffers = [labels]
-            for k,v in batch.items():
-                if isinstance(v, torch.Tensor):
-                    cp_buffers.append(v)
 
-            # Create context parallel context if cp is enabled
-            optional_context_parallel_ctx = (
-            training.create_context_parallel_ctx(
-                cp_mesh=self.world_mesh["cp"],
-                cp_buffers=cp_buffers,
-                cp_seq_dims=[1]*len(cp_buffers),
-                cp_no_restore_buffers=set(cp_buffers),
-                cp_rotate_method=self.context_parallel_rotate_method,
-            )
-            if self.parallel_dims.cp_enabled
-            else None
-            )
-
-            with optional_context_parallel_ctx:
-                with self.activations_handling_ctx:
-                    outputs = self._model(**batch)
-        else:
-            with self.activations_handling_ctx:
-                outputs = self._model(**batch)
+        with self.activations_handling_ctx:
+            outputs = self._model(**batch)
 
         if self.linear_loss:
             weight = self._model.linear_projection_weight
@@ -992,7 +991,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
 
         return loss
 
-    def validate(self) -> dict[str, float]:
+    def validate(self) -> Dict[str, float]:
         """
         Run validation loop and return average validation loss.
         """
@@ -1004,17 +1003,18 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         with torch.no_grad():
             for batch_idx, batch in enumerate(self._val_dataloader):
                 utils.batch_to_device(batch, self._device)
-
+                val_cp_ctx = self._prepare_cp_context(batch) if self.cp_degree > 1 else nullcontext()
                 # Count tokens excluding padding
-                current_num_tokens = (
-                    batch["labels"] != self._loss_fn.ignore_index
-                ).sum()
+                with val_cp_ctx:
+                    current_num_tokens = (
+                        batch["labels"] != self._loss_fn.ignore_index
+                    ).sum()
 
-                # Compute loss
-                val_loss = self._loss_step(batch) * current_num_tokens
+                    # Compute loss
+                    val_loss = self._loss_step(batch) * current_num_tokens
 
-                total_val_loss += val_loss
-                total_val_tokens += current_num_tokens
+                    total_val_loss += val_loss
+                    total_val_tokens += current_num_tokens
 
         # Aggregate validation metrics across all ranks
         torch.distributed.all_reduce(total_val_loss)
