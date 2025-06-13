@@ -153,7 +153,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         self.tp_degree = cfg.get("tensor_parallel_dim", 1)
         assert (self.tp_degree == 1), "Tensor parallelism is not supported in this recipe. Please set tensor_parallel_dim to 1."
         if self.cp_degree > 1:
-            assert not (cfg.model.get("max_seq_len")) and (cfg.tokenizer.max_seq_len == cfg.model.max_seq_len), (
+            assert (cfg.model.get("max_seq_len")) or (cfg.tokenizer.max_seq_len == cfg.model.max_seq_len), (
                 "When using context parallelism, the tokenizer and model max_seq_len must match."
             )
 
