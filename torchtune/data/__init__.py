@@ -32,7 +32,7 @@ from torchtune.data._prompt_templates import (
     QuestionAnswerTemplate,
     SummarizeTemplate,
 )
-from torchtune.data._utils import format_content_with_images, load_image, truncate
+from torchtune.data._utils import format_content_with_images, load_image, truncate, pad_tokens
 
 __all__ = [
     "CROSS_ENTROPY_IGNORE_IDX",
@@ -60,4 +60,5 @@ __all__ = [
     "padded_collate_tiled_images_and_mask",
     "padded_collate_packed",
     "load_image",
+    "pad_tokens",
 ]
