@@ -82,7 +82,8 @@ class Llama3Tokenizer(ModelTokenizer, Transform):
         max_seq_len: Optional[int] = None,
         prompt_template: Optional[PromptTemplate] = None,
         truncation_type: str = "right",
-        pad_to_max_seq_len: bool = False,
+        padding: bool = False,
+        context_parallel_dim: Optional[int] = None,
     ):
         self.special_tokens = (
             special_tokens if special_tokens is not None else LLAMA3_SPECIAL_TOKENS
@@ -119,7 +120,8 @@ class Llama3Tokenizer(ModelTokenizer, Transform):
             special_tokens=self.special_tokens,
         )
         self.max_seq_len = max_seq_len
-        self.pad_to_max_seq_len = pad_to_max_seq_len
+        self.padding = padding
+        self.context_parallel_dim = context_parallel_dim
         self.prompt_template = prompt_template
 
         # Regex for removing special tokens from the decoded string
@@ -342,12 +344,13 @@ class Llama3Tokenizer(ModelTokenizer, Transform):
                 truncation_type=self.truncation_type,
             )
 
-        if self.pad_to_max_seq_len:
+        if self.padding:
             tokens, mask = pad_tokens(
                 tokens=tokens,
                 mask=mask,
                 max_seq_len=self.max_seq_len,
                 pad_id=self.pad_id,
+                context_parallel_dim=self.context_parallel_dim,
             )
 
         return tokens, mask

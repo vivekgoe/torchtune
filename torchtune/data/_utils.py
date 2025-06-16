@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, TypeVar, Union
 from urllib import request
 
+import math
 import torch
 import torchvision
 from datasets import load_dataset
@@ -67,28 +68,45 @@ def pad_tokens(
     mask: List[Any],
     max_seq_len: int,
     pad_id: int,
-    eos_id: Optional[Any] = None,
     pad_type: str = "right",
+    context_parallel_dim: Optional[int] = None,
 ) -> List[Any]:
     """
     Pad a list of tokens and masks to a maximum seq length.
-    If eos_id is provided, the last token will be replaced with eos_id.
+    If context_parallel_dim is provided, pads tokens such that the total length
+    is divisible by 2 * context_parallel_dim instead of maximum seq length
     Args:
         tokens (List[Any]): list of tokens to pad
         mask (List[Any]): list of masks to pad
         max_seq_len (int): maximum length of the list
         pad_id (int): token used for padding
-        eos_id (Optional[Any]): token to replace the last token with. If None, the
-            last token will not be replaced. Default is None.
         pad_type (str): type of padding to apply, either "left" or "right".
             Default is "right".
+        context_parallel_dim (Optional[int]): If provided, ensures sequence length is
+            divisible by this value or twice this value. Default is None.
     Returns:
         Tuple[List[Any], List[bool]]: padded tokens and attention mask (True for real tokens, False for padding)
     Raises:
         ValueError: if pad_type is not "left" or "right"
     """
 
-    padding_length = max_seq_len - len(tokens)
+    tokens_len = len(tokens)
+
+    # Calculate padding needed
+    if context_parallel_dim is not None and context_parallel_dim > 1:
+        if tokens_len % (2 * context_parallel_dim) == 0:
+            padding_length = 0
+        else:
+            # Find next length divisible by 2*CP (whichever requires less padding)
+            supported_cp_len = math.ceil(tokens_len / context_parallel_dim * 2) * (2 * context_parallel_dim)
+            padding_length = supported_cp_len - tokens_len
+    elif max_seq_len is not None:
+        # Standard padding to max_seq_len
+        padding_length = max_seq_len - tokens_len
+    else:
+        padding_length = 0
+
+    # Apply padding
     if padding_length > 0:
         if pad_type == "right":
             tokens = tokens + [pad_id] * padding_length
@@ -100,10 +118,6 @@ def pad_tokens(
             raise ValueError(
                 f"truncation_type must be 'left' or 'right', got {pad_type}"
             )
-
-    # Replace the last token with eos_id if necessary
-    if eos_id is not None and tokens and tokens[-1] != eos_id:
-        tokens[-1] = eos_id
 
     return tokens, mask
 

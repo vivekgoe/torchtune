@@ -24,7 +24,7 @@ tokenizer:
   _component_: torchtune.models.llama3.llama3_tokenizer
   path: /tmp/Meta-Llama-3.1-8B-Instruct/original/tokenizer.model
   max_seq_len: null
-  pad_to_max_seq_len: True # True pads to max_seq_len, enable (ideally) when dataset.packed=False
+  paddding: True # True pads to max_seq_len or minimum length that is divisible be cp degree * 2
 
 # Model Arguments
 model:

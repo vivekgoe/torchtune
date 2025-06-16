@@ -156,6 +156,9 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
             assert (cfg.model.get("max_seq_len")) or (cfg.tokenizer.max_seq_len == cfg.model.max_seq_len), (
                 "When using context parallelism, the tokenizer and model max_seq_len must match."
             )
+            assert not cfg.tokenizer.get("padding"), (
+            "When using context parallelism, the tokenizer padding should must be True."
+        )
 
         # Set up n-d device mesh
         self.parallel_dims = training.ParallelDims(
@@ -337,6 +340,13 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                 else None
             ),
         )
+
+        # Current cp implementation only supports packed = False dataset.
+        # Hence, seq length of each batch should be such that it is divisible by cp_degree.
+        # Passing `context_parallel_dim` to tokenizer ensures that.
+        if self.cp_degree > 1:
+            cfg.tokenizer["context_parallel_dim"] = self.cp_degree
+
         self._tokenizer = config.instantiate(cfg.tokenizer)
 
         self._optimizer = self._setup_optimizer(
