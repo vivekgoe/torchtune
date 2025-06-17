@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import math
 import torch
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
@@ -193,6 +194,7 @@ def padded_collate_sft(
     ignore_idx: int = CROSS_ENTROPY_IGNORE_IDX,
     pad_to_multiple_of: int = 1,
     stack_on_new_dim: bool = False,
+    cp_degree: Optional[int] = 1,
 ) -> Dict[str, torch.Tensor]:
     """Pad a batch of sequences to the longest sequence length in the batch, and
     convert integer lists to tensors.
@@ -203,7 +205,9 @@ def padded_collate_sft(
         ignore_idx (int): Padding index for labels. Defaults to -100.
         pad_to_multiple_of (int): If > 1, pad the sequence to a multiple of this number.
             This is useful for proper sharding with e.g. SequenceParallel.
-        stack_on_new_dim (bool): If True, stack any encoder tensors on a new dimension. Default is False
+        stack_on_new_dim (bool): If True, stack any encoder tensors on a new dimension. Default is False.
+        cp_degree (Optional[int]): If > 1, pad the input ids to a length that is divisible by (2 * cp_degree).
+            This is required for sharding with `context_parallel` (see :`torch.distributed.tensor.experimental.context_parallel`).
 
     Returns:
         Dict[str, torch.Tensor]: Collated input and label tensors.
@@ -223,6 +227,20 @@ def padded_collate_sft(
         >>> collated["labels"]
         >>> tensor([[4, 5, 6], [10, -100, -100]])
     """
+
+    # max seq length of each batch should be divisible by cp_degree.
+    # make largest sequence length divisible by (2 * cp_degree)
+    if cp_degree > 1:
+        original_lengths = [(i, len(x["tokens"])) for i, x in enumerate(batch)]
+        index, batch_max_len = sorted(original_lengths, key=lambda x:x[1])[-1]
+        if batch_max_len % (2 * cp_degree) != 0:
+            supported_cp_len = math.ceil(batch_max_len / cp_degree * 2) * (2 * cp_degree)
+            cp_pad_len = supported_cp_len - batch_max_len
+        else:
+            cp_pad_len = 0
+
+        batch[index]["tokens"] += [padding_idx] * cp_pad_len
+
     input_ids = pad_sequence(
         [torch.tensor(x["tokens"]) for x in batch],
         batch_first=True,
@@ -262,6 +280,13 @@ def padded_collate_sft(
             value=ignore_idx,
         )
     batch_dict = {"tokens": input_ids.long(), "labels": labels.long()}
+
+    # Add input_pos if cp_degree > 1
+    if cp_degree > 1:
+        batch_size, num_tokens = input_ids.shape
+        input_pos = torch.arange(num_tokens).repeat(batch_size, 1)
+        batch_dict["input_pos"] = input_pos.long()
+
     if "encoder_input" in batch[0]:
         x = [x["encoder_input"] for x in batch]
         batched_encodings = _stack_encoder_input(x, new_dim=stack_on_new_dim)

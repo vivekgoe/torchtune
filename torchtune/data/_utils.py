@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, TypeVar, Union
 from urllib import request
 
-import math
 import torch
 import torchvision
 from datasets import load_dataset
@@ -63,63 +62,6 @@ def truncate(
 
     return tokens_truncated
 
-def pad_tokens(
-    tokens: List[Any],
-    mask: List[Any],
-    max_seq_len: int,
-    pad_id: int,
-    pad_type: str = "right",
-    context_parallel_dim: Optional[int] = None,
-) -> List[Any]:
-    """
-    Pad a list of tokens and masks to a maximum seq length.
-    If context_parallel_dim is provided, pads tokens such that the total length
-    is divisible by 2 * context_parallel_dim instead of maximum seq length
-    Args:
-        tokens (List[Any]): list of tokens to pad
-        mask (List[Any]): list of masks to pad
-        max_seq_len (int): maximum length of the list
-        pad_id (int): token used for padding
-        pad_type (str): type of padding to apply, either "left" or "right".
-            Default is "right".
-        context_parallel_dim (Optional[int]): If provided, ensures sequence length is
-            divisible by this value or twice this value. Default is None.
-    Returns:
-        Tuple[List[Any], List[bool]]: padded tokens and attention mask (True for real tokens, False for padding)
-    Raises:
-        ValueError: if pad_type is not "left" or "right"
-    """
-
-    tokens_len = len(tokens)
-
-    # Calculate padding needed
-    if context_parallel_dim is not None and context_parallel_dim > 1:
-        if tokens_len % (2 * context_parallel_dim) == 0:
-            padding_length = 0
-        else:
-            # Find next length divisible by 2*CP (whichever requires less padding)
-            supported_cp_len = math.ceil(tokens_len / context_parallel_dim * 2) * (2 * context_parallel_dim)
-            padding_length = supported_cp_len - tokens_len
-    elif max_seq_len is not None:
-        # Standard padding to max_seq_len
-        padding_length = max_seq_len - tokens_len
-    else:
-        padding_length = 0
-
-    # Apply padding
-    if padding_length > 0:
-        if pad_type == "right":
-            tokens = tokens + [pad_id] * padding_length
-            mask = mask + [False] * padding_length
-        elif pad_type == "left":
-            tokens = [pad_id] * padding_length + tokens
-            mask = [False] * padding_length + mask
-        else:
-            raise ValueError(
-                f"truncation_type must be 'left' or 'right', got {pad_type}"
-            )
-
-    return tokens, mask
 
 def load_image(image_loc: Union[Path, str]) -> torch.Tensor:
     """

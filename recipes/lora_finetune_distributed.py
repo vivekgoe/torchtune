@@ -152,13 +152,11 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         self.context_parallel_rotate_method = cfg.get("context_parallel_rotate_method", "none")
         self.tp_degree = cfg.get("tensor_parallel_dim", 1)
         assert (self.tp_degree == 1), "Tensor parallelism is not supported in this recipe. Please set tensor_parallel_dim to 1."
-        if self.cp_degree > 1:
-            assert (cfg.model.get("max_seq_len")) or (cfg.tokenizer.max_seq_len == cfg.model.max_seq_len), (
-                "When using context parallelism, the tokenizer and model max_seq_len must match."
+        if self.cp_degree > 1 and cfg.dataset.get("packed", False):
+            raise RuntimeError(
+                "Context parallelism is not supported with packed datasets. "
+                "Please set `packed: False` in the yaml recipe."
             )
-            assert not cfg.tokenizer.get("padding"), (
-            "When using context parallelism, the tokenizer padding should must be True."
-        )
 
         # Set up n-d device mesh
         self.parallel_dims = training.ParallelDims(
@@ -340,12 +338,6 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                 else None
             ),
         )
-
-        # Current cp implementation only supports packed = False dataset.
-        # Hence, seq length of each batch should be such that it is divisible by cp_degree.
-        # Passing `context_parallel_dim` to tokenizer ensures that.
-        if self.cp_degree > 1:
-            cfg.tokenizer["context_parallel_dim"] = self.cp_degree
 
         self._tokenizer = config.instantiate(cfg.tokenizer)
 
@@ -704,6 +696,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                     collate_fn,
                     padding_idx=self._tokenizer.pad_id,
                     ignore_idx=self._loss_fn.ignore_index,
+                    cp_degree=self.cp_degree,
                 )
                 if not packed
                 else padded_collate_packed
@@ -830,19 +823,16 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
     def _prepare_cp_context(self, batch: Dict[str, torch.Tensor]) -> Any:
         """Prepare context parallel context for the given batch."""
         # For cp we need to pass the buffer and buffer dim to apply cp
-        cp_buffers = []
+        input_buffers = []
         for k, v in batch.items():
             if isinstance(v, torch.Tensor):
-                cp_buffers.append(v)
-
-        # If the model has cache, add it to cp buffers
-        rope_cache = [module.cache for module in self._model.modules() if hasattr(module, "cache")]
+                input_buffers.append(v)
 
         return training.create_context_parallel_ctx(
             cp_mesh=self.world_mesh["cp"],
-            cp_buffers=cp_buffers + rope_cache,
-            cp_seq_dims=[1] * len(cp_buffers) + [0] * len(rope_cache),
-            cp_no_restore_buffers=set(cp_buffers),
+            cp_buffers=input_buffers,
+            cp_seq_dims=[1] * len(input_buffers),
+            cp_no_restore_buffers=set(input_buffers),
             cp_rotate_method=self.context_parallel_rotate_method,
         )
 
@@ -878,6 +868,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                     torch.cuda.memory._record_memory_history()
 
                 utils.batch_to_device(batch, self._device)
+                # Create CP context if CP is enabled
                 cp_ctx = self._prepare_cp_context(batch) if self.cp_degree > 1 else nullcontext()
                 with cp_ctx:
                     # Calculate the number of unmasked tokens in the current batch

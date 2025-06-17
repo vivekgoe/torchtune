@@ -71,8 +71,6 @@ def llama3_tokenizer(
     max_seq_len: Optional[int] = None,
     prompt_template: Optional[_TemplateType] = None,
     truncation_type: str = "right",
-    padding: bool = False,
-    context_parallel_dim: Optional[int] = None,
 ) -> Llama3Tokenizer:
     """
     Tokenizer for Llama3.
@@ -108,8 +106,6 @@ def llama3_tokenizer(
         max_seq_len=max_seq_len,
         prompt_template=template,
         truncation_type=truncation_type,
-        padding=padding,
-        context_parallel_dim=context_parallel_dim,
     )
 
 
