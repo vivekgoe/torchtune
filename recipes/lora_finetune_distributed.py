@@ -149,9 +149,13 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         data_shard = cfg.get("data_parallel_shard_dim", -1)  # -1 means to infer
         data_replicate = cfg.get("data_parallel_replicate_dim", 1)
         self.cp_degree = cfg.get("context_parallel_dim", 1)
-        self.context_parallel_rotate_method = cfg.get("context_parallel_rotate_method", "none")
+        self.context_parallel_rotate_method = cfg.get(
+            "context_parallel_rotate_method", "none"
+        )
         self.tp_degree = cfg.get("tensor_parallel_dim", 1)
-        assert (self.tp_degree == 1), "Tensor parallelism is not supported in this recipe. Please set tensor_parallel_dim to 1."
+        assert (
+            self.tp_degree == 1
+        ), "Tensor parallelism is not supported in this recipe. Please set tensor_parallel_dim to 1."
         if self.cp_degree > 1 and cfg.dataset.get("packed", False):
             raise RuntimeError(
                 "Context parallelism is not supported with packed datasets. "
@@ -513,9 +517,9 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
 
         if self.cp_degree > 1:
             utils.log_rank_zero(
-            self._logger,
-            f"CP is enabled with degree {self.cp_degree} and rotate method {self.context_parallel_rotate_method}.",
-        )
+                self._logger,
+                f"CP is enabled with degree {self.cp_degree} and rotate method {self.context_parallel_rotate_method}.",
+            )
         utils.log_rank_zero(
             self._logger,
             "FSDP is enabled. Instantiating model and loading checkpoint on Rank 0 ...",
@@ -869,7 +873,11 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
 
                 utils.batch_to_device(batch, self._device)
                 # Create CP context if CP is enabled
-                cp_ctx = self._prepare_cp_context(batch) if self.cp_degree > 1 else nullcontext()
+                cp_ctx = (
+                    self._prepare_cp_context(batch)
+                    if self.cp_degree > 1
+                    else nullcontext()
+                )
                 with cp_ctx:
                     # Calculate the number of unmasked tokens in the current batch
                     # and increment the total number of tokens seen in the step
@@ -1008,7 +1016,11 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         with torch.no_grad():
             for batch_idx, batch in enumerate(self._val_dataloader):
                 utils.batch_to_device(batch, self._device)
-                val_cp_ctx = self._prepare_cp_context(batch) if self.cp_degree > 1 else nullcontext()
+                val_cp_ctx = (
+                    self._prepare_cp_context(batch)
+                    if self.cp_degree > 1
+                    else nullcontext()
+                )
                 # Count tokens excluding padding
                 with val_cp_ctx:
                     current_num_tokens = (

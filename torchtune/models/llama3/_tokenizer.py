@@ -118,6 +118,7 @@ class Llama3Tokenizer(ModelTokenizer, Transform):
             special_tokens=self.special_tokens,
         )
         self.max_seq_len = max_seq_len
+
         self.prompt_template = prompt_template
 
         # Regex for removing special tokens from the decoded string

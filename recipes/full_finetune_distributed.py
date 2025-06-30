@@ -149,7 +149,9 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
         data_shard = cfg.get("data_parallel_shard_dim", -1)  # -1 means to infer
         data_replicate = cfg.get("data_parallel_replicate_dim", 1)
         self.cp_degree = cfg.get("context_parallel_dim", 1)
-        self.context_parallel_rotate_method = cfg.get("context_parallel_rotate_method", "none")
+        self.context_parallel_rotate_method = cfg.get(
+            "context_parallel_rotate_method", "none"
+        )
         self.tp_plan = cfg.get("tensor_parallel_plan", None)
         self.tp_degree = cfg.get("tensor_parallel_dim", 1)
         if self.tp_degree > 1 and self.tp_plan is None:
@@ -846,7 +848,11 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
             for batch_idx, batch in enumerate(self._val_dataloader):
                 utils.batch_to_device(batch, self._device)
                 # Create validation-specific CP context
-                val_cp_ctx = self._prepare_cp_context(batch) if self.cp_degree > 1 else nullcontext()
+                val_cp_ctx = (
+                    self._prepare_cp_context(batch)
+                    if self.cp_degree > 1
+                    else nullcontext()
+                )
                 with val_cp_ctx:
                     # Count tokens excluding padding
                     current_num_tokens = (
@@ -917,7 +923,11 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
 
                 utils.batch_to_device(batch, self._device)
                 # Create CP context if CP is enabled
-                cp_ctx = self._prepare_cp_context(batch) if self.cp_degree > 1 else nullcontext()
+                cp_ctx = (
+                    self._prepare_cp_context(batch)
+                    if self.cp_degree > 1
+                    else nullcontext()
+                )
                 with cp_ctx:
                     # Calculate the number of unmasked tokens in the current batch
                     # and increment the total number of tokens seen in the step

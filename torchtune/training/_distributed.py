@@ -702,6 +702,7 @@ def create_context_parallel_ctx(
         no_restore_buffers=cp_no_restore_buffers,
     )
 
+
 def prepare_mha_for_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,

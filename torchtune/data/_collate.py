@@ -3,9 +3,9 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+import math
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import math
 import torch
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
@@ -232,9 +232,11 @@ def padded_collate_sft(
     # make largest sequence length divisible by (2 * cp_degree)
     if cp_degree > 1:
         original_lengths = [(i, len(x["tokens"])) for i, x in enumerate(batch)]
-        index, batch_max_len = sorted(original_lengths, key=lambda x:x[1])[-1]
+        index, batch_max_len = sorted(original_lengths, key=lambda x: x[1])[-1]
         if batch_max_len % (2 * cp_degree) != 0:
-            supported_cp_len = math.ceil(batch_max_len / cp_degree * 2) * (2 * cp_degree)
+            supported_cp_len = math.ceil(batch_max_len / cp_degree * 2) * (
+                2 * cp_degree
+            )
             cp_pad_len = supported_cp_len - batch_max_len
         else:
             cp_pad_len = 0
@@ -284,8 +286,8 @@ def padded_collate_sft(
     # Add input_pos if cp_degree > 1
     if cp_degree > 1:
         batch_size, num_tokens = input_ids.shape
-        input_pos = torch.arange(num_tokens).repeat(batch_size, 1)
-        batch_dict["input_pos"] = input_pos.long()
+        input_pos = torch.arange(num_tokens, dtype=torch.long).repeat(batch_size, 1)
+        batch_dict["input_pos"] = input_pos
 
     if "encoder_input" in batch[0]:
         x = [x["encoder_input"] for x in batch]
