@@ -440,3 +440,32 @@ class TestTensorParalell(FSDPTest):
         assert decoder_layer.attn.num_heads == orig_num_heads // 2
         assert decoder_layer.attn.num_kv_heads == orig_num_kv_heads // 2
         assert decoder_layer.attn.embed_dim == orig_embed_dim // 2
+
+
+class TestContextParalell(FSDPTest):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @pytest.mark.parametrize("rotate_method", ["allgather", "alltoall"])
+    @gpu_test(gpu_count=2)
+    def test_context_parallel_ctx(self, rotate_method) -> None:
+        """Test context parallelism preparation for multi-head attention."""
+        # Create a device mesh for context parallelism
+        mesh = dist.init_device_mesh("cuda", mesh_shape=(2,))
+
+        tensor_to_shard = torch.tensor([[1.0, 2.0], [3.0, 4.0]], device="cuda")
+        tensor_to_unshard = torch.tensor([[5.0, 6.0], [7.0, 8.0]], device="cuda")
+        with training.context_parallel_ctx(
+            cp_mesh=mesh,
+            cp_buffers=[tensor_to_shard, tensor_to_unshard],
+            cp_seq_dims=[0, 0],
+            cp_no_restore_buffers=set(tensor_to_shard),
+            cp_rotate_method=rotate_method,
+        ):
+            # Inside this context, the tensors should be sharded
+            assert tensor_to_shard.to_local().shape == (1, 2)
+            assert tensor_to_unshard.to_local().shape == (1, 2)
+
+        assert tensor_to_shard.to_local().shape == (1, 2)
+        assert tensor_to_unshard.to_local().shape == (2, 2)

@@ -122,6 +122,37 @@ class TestPaddedCollateSFT:
         torch.testing.assert_close(padded_result["tokens"], expected_tokens)
         torch.testing.assert_close(padded_result["labels"], expected_labels)
 
+    def test_batch_pad_sequence_with_cp_degree(self, test_batch):
+        """
+        Test that sequences are padded correctly when cp_degree > 1.
+        The longest sequence should be padded to be divisible by (2 * cp_degree).
+        """
+        cp_degree = 2
+
+        # Apply padding with cp_degree
+        padded_result = padded_collate_sft(
+            batch=test_batch,
+            padding_idx=self.padding_idx,
+            ignore_idx=self.ignore_idx,
+            cp_degree=cp_degree,
+        )
+
+        # The longest sequence has length 3, which should be padded to 8
+        # (next multiple of 2 * cp_degree = 4)
+        expected_seq_len = 8
+
+        # Verify sequence length is divisible by (2 * cp_degree)
+        actual_seq_len = padded_result["tokens"].shape[1]
+        assert actual_seq_len == expected_seq_len
+        assert actual_seq_len % (2 * cp_degree) == 0
+
+        # Verify input_pos is added when cp_degree > 1
+        assert "input_pos" in padded_result
+        expected_input_pos = torch.arange(expected_seq_len, dtype=torch.long).repeat(
+            2, 1
+        )
+        torch.testing.assert_close(padded_result["input_pos"], expected_input_pos)
+
 
 class TestPaddedCollateTiledImagesAndMask:
     img_shape = 1, 1, 1

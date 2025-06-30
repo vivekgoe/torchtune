@@ -7,6 +7,7 @@
 import sys
 import time
 
+from contextlib import nullcontext
 from functools import partial
 from typing import Any, Dict, List, Optional, Union
 from warnings import warn
@@ -145,20 +146,30 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
         # Initialize distributed variables
         self.world_size, self.rank = utils.get_world_size_and_rank()
         self._is_rank_zero = self.rank == 0
+        data_shard = cfg.get("data_parallel_shard_dim", -1)  # -1 means to infer
+        data_replicate = cfg.get("data_parallel_replicate_dim", 1)
+        self.cp_degree = cfg.get("context_parallel_dim", 1)
+        self.context_parallel_rotate_method = cfg.get(
+            "context_parallel_rotate_method", "none"
+        )
         self.tp_plan = cfg.get("tensor_parallel_plan", None)
         self.tp_degree = cfg.get("tensor_parallel_dim", 1)
         if self.tp_degree > 1 and self.tp_plan is None:
             raise ValueError(
                 "Tensor Parallel plan needs to be provided when tensor parallel is enabled."
             )
-        data_shard = cfg.get("data_parallel_shard_dim", -1)  # -1 means to infer
-        data_replicate = cfg.get("data_parallel_replicate_dim", 1)
+        if self.cp_degree > 1 and cfg.dataset.get("packed", False):
+            raise RuntimeError(
+                "Context parallelism is not supported with packed datasets. "
+                "Please set `packed: False` in the yaml recipe."
+            )
 
         # Set up n-d device mesh
         self.parallel_dims = training.ParallelDims(
             dp_replicate=data_replicate,
             dp_shard=data_shard,
             tp=self.tp_degree,
+            cp=self.cp_degree,
             world_size=self.world_size,
         )
         self.world_mesh = self.parallel_dims.build_mesh(device_type=device_type)
@@ -317,6 +328,7 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
             ac_mode=cfg.get("ac_mode", None),
             ac_option=cfg.get("ac_option", None),
         )
+
         self._tokenizer = config.instantiate(cfg.tokenizer)
 
         self._optimizer = self._setup_optimizer(
@@ -777,6 +789,7 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
                     padding_idx=self._tokenizer.pad_id,
                     ignore_idx=self._loss_fn.ignore_index,
                     pad_to_multiple_of=self.tp_degree,
+                    cp_degree=self.cp_degree,
                 )
                 if not packed
                 else padded_collate_packed
@@ -786,6 +799,22 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
         )
 
         return dataloader
+
+    def _prepare_cp_context(self, batch: Dict[str, torch.Tensor]) -> Any:
+        """Prepare context parallel context for the given batch."""
+        # For cp we need to pass the buffer and buffer dim to apply cp
+        input_buffers = []
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                input_buffers.append(v)
+
+        return training.create_context_parallel_ctx(
+            cp_mesh=self.world_mesh["cp"],
+            cp_buffers=input_buffers,
+            cp_seq_dims=[1] * len(input_buffers),
+            cp_no_restore_buffers=set(input_buffers),
+            cp_rotate_method=self.context_parallel_rotate_method,
+        )
 
     def _loss_step(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         # Shape [b, s], needed for the loss not the model
@@ -818,17 +847,23 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
         with torch.no_grad():
             for batch_idx, batch in enumerate(self._val_dataloader):
                 utils.batch_to_device(batch, self._device)
+                # Create validation-specific CP context
+                val_cp_ctx = (
+                    self._prepare_cp_context(batch)
+                    if self.cp_degree > 1
+                    else nullcontext()
+                )
+                with val_cp_ctx:
+                    # Count tokens excluding padding
+                    current_num_tokens = (
+                        batch["labels"] != self._loss_fn.ignore_index
+                    ).sum()
 
-                # Count tokens excluding padding
-                current_num_tokens = (
-                    batch["labels"] != self._loss_fn.ignore_index
-                ).sum()
+                    # Compute loss
+                    val_loss = self._loss_step(batch) * current_num_tokens
 
-                # Compute loss
-                val_loss = self._loss_step(batch) * current_num_tokens
-
-                total_val_loss += val_loss
-                total_val_tokens += current_num_tokens
+                    total_val_loss += val_loss
+                    total_val_tokens += current_num_tokens
 
         # Aggregate validation metrics across all ranks
         torch.distributed.all_reduce(total_val_loss)
@@ -887,27 +922,34 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
                     torch.cuda.memory._record_memory_history()
 
                 utils.batch_to_device(batch, self._device)
+                # Create CP context if CP is enabled
+                cp_ctx = (
+                    self._prepare_cp_context(batch)
+                    if self.cp_degree > 1
+                    else nullcontext()
+                )
+                with cp_ctx:
+                    # Calculate the number of unmasked tokens in the current batch
+                    # and increment the total number of tokens seen in the step
+                    current_num_tokens = (
+                        batch["labels"] != self._loss_fn.ignore_index
+                    ).sum()
+                    num_tokens += current_num_tokens
 
-                # Calculate the number of unmasked tokens in the current batch
-                # and increment the total number of tokens seen in the step
-                current_num_tokens = (
-                    batch["labels"] != self._loss_fn.ignore_index
-                ).sum()
-                num_tokens += current_num_tokens
+                    # Loss is normalized by default so we multiply by the number of tokens
+                    # This way we can normalize by the total number of tokens if we're accumulating gradients
+                    current_loss = self._loss_step(batch) * current_num_tokens
+                    running_loss += current_loss
 
-                # Loss is normalized by default so we multiply by the number of tokens
-                # This way we can normalize by the total number of tokens if we're accumulating gradients
-                current_loss = self._loss_step(batch) * current_num_tokens
-                running_loss += current_loss
+                    # For optimizer in backward, we need to normalize before calling backward
+                    # This case and gradient accumulation are mutually exclusive
+                    if self._optimizer_in_bwd:
+                        torch.distributed.all_reduce(num_tokens)
+                        torch.distributed.all_reduce(running_loss)
+                        current_loss = current_loss * (self.dp_degree / num_tokens)
 
-                # For optimizer in backward, we need to normalize before calling backward
-                # This case and gradient accumulation are mutually exclusive
-                if self._optimizer_in_bwd:
-                    torch.distributed.all_reduce(num_tokens)
-                    torch.distributed.all_reduce(running_loss)
-                    current_loss = current_loss * (self.dp_degree / num_tokens)
+                    current_loss.backward()
 
-                current_loss.backward()
                 # Optimizer step (if not fused in backward call)
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
                     if not self._optimizer_in_bwd:
